@@ -1,0 +1,22 @@
+---
+# ACI connection parameters — values come from environment variables.
+# Never hardcode credentials here. Set these in your shell or CI secrets.
+#
+# Required env vars:
+#   APIC_USERNAME
+#   APIC_PASSWORD
+
+ansible_connection: local
+
+aci_hostname: "{{ ansible_host }}"
+aci_username: "{{ lookup('env', 'APIC_USERNAME') }}"
+aci_password: "{{ lookup('env', 'APIC_PASSWORD') }}"
+aci_validate_certs: false        # set to true for production with valid cert
+aci_use_ssl: true
+aci_use_proxy: false
+
+# Annotation stamped on every object this pipeline creates
+aci_annotation: "orchestrated-by:aci-gitops-pipeline"
+
+# Default timeout for APIC API calls (seconds)
+aci_timeout: 30

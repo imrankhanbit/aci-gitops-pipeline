@@ -1,0 +1,215 @@
+# ============================================================
+# deploy.yml — Production Deployment Pipeline
+#
+# Triggered on merge to main (push to main branch).
+# Runs the full change lifecycle:
+#   1. Open ServiceNow change request
+#   2. Deploy via Ansible (Terraform state is managed separately)
+#   3. Post-deploy health check (Python APIC query)
+#   4. Close ServiceNow CR with evidence
+# ============================================================
+
+name: Deploy — Merge to Main
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tenants/**"
+      - "ansible/**"
+      - "terraform/**"
+
+env:
+  PYTHON_VERSION: "3.11"
+  APIC_HOST: ${{ secrets.APIC_HOST }}
+  APIC_USERNAME: ${{ secrets.APIC_USERNAME }}
+  APIC_PASSWORD: ${{ secrets.APIC_PASSWORD }}
+  SNOW_INSTANCE: ${{ secrets.SNOW_INSTANCE }}
+  SNOW_USERNAME: ${{ secrets.SNOW_USERNAME }}
+  SNOW_PASSWORD: ${{ secrets.SNOW_PASSWORD }}
+  SNOW_ASSIGNMENT_GROUP: ${{ secrets.SNOW_ASSIGNMENT_GROUP }}
+
+jobs:
+
+  # ────────────────────────────────────────────────────────────
+  # Job 1: Open ServiceNow Change Request
+  # ────────────────────────────────────────────────────────────
+  open-change:
+    name: Open ServiceNow CR
+    runs-on: ubuntu-latest
+    outputs:
+      cr_number: ${{ steps.create-cr.outputs.cr_number }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Detect changed tenant
+        id: detect-tenant
+        run: |
+          TENANT_FILE=$(git diff --name-only HEAD~1...HEAD -- 'tenants/*.yml' | head -1)
+          TENANT_NAME=$(basename "${TENANT_FILE:-tenants/dev-tenant.yml}" .yml)
+          echo "tenant_file=${TENANT_FILE:-tenants/dev-tenant.yml}" >> "$GITHUB_OUTPUT"
+          echo "tenant_name=${TENANT_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Create ServiceNow change request
+        id: create-cr
+        run: |
+          python python/servicenow_cr.py create \
+            --tenant "${{ steps.detect-tenant.outputs.tenant_name }}" \
+            --pipeline-url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --description "Automated deployment: ${{ github.event.head_commit.message }}"
+          echo "cr_number=$(cat .snow_cr_number)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload CR artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: snow-cr-ids
+          path: |
+            .snow_cr_sysid
+            .snow_cr_number
+
+  # ────────────────────────────────────────────────────────────
+  # Job 2: Ansible Deploy
+  # ────────────────────────────────────────────────────────────
+  ansible-deploy:
+    name: Ansible Deploy to APIC
+    runs-on: ubuntu-latest
+    needs: open-change
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Ansible and collections
+        run: |
+          pip install ansible
+          ansible-galaxy collection install -r ansible/ansible-requirements.yml
+
+      - name: Detect changed tenant file
+        id: detect-tenant
+        run: |
+          TENANT_FILE=$(git diff --name-only HEAD~1...HEAD -- 'tenants/*.yml' | head -1)
+          echo "tenant_file=${TENANT_FILE:-tenants/dev-tenant.yml}" >> "$GITHUB_OUTPUT"
+          echo "tenant_name=$(basename ${TENANT_FILE:-tenants/dev-tenant.yml} .yml)" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy tenant configuration
+        working-directory: ansible
+        run: |
+          ansible-playbook playbooks/provision_tenant.yml \
+            -i inventory/hosts.yml \
+            -e "tenant_file=../../${{ steps.detect-tenant.outputs.tenant_file }}" \
+            -e "target_host=prod-apic" \
+            -v 2>&1 | tee /tmp/ansible-deploy.log
+
+      - name: Upload deploy log
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ansible-deploy-log
+          path: /tmp/ansible-deploy.log
+
+  # ────────────────────────────────────────────────────────────
+  # Job 3: Post-Deploy Health Check
+  # ────────────────────────────────────────────────────────────
+  health-check:
+    name: Post-Deploy Health Check
+    runs-on: ubuntu-latest
+    needs: ansible-deploy
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Detect deployed tenant
+        id: detect-tenant
+        run: |
+          TENANT_FILE=$(git diff --name-only HEAD~1...HEAD -- 'tenants/*.yml' | head -1)
+          TENANT_NAME=$(python3 -c "
+          import yaml, sys
+          with open('${TENANT_FILE:-tenants/dev-tenant.yml}') as f:
+              d = yaml.safe_load(f)
+          print(d['tenant']['name'])
+          ")
+          echo "tenant_name=${TENANT_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Run APIC health check
+        run: |
+          python python/apic_health.py \
+            --tenant "${{ steps.detect-tenant.outputs.tenant_name }}" \
+            --output-json /tmp/health-report.json
+
+      - name: Upload health report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: health-report
+          path: /tmp/health-report.json
+
+  # ────────────────────────────────────────────────────────────
+  # Job 4: Close ServiceNow CR
+  # Runs even if health-check fails (to leave evidence in CR)
+  # ────────────────────────────────────────────────────────────
+  close-change:
+    name: Close ServiceNow CR
+    runs-on: ubuntu-latest
+    needs: [open-change, health-check]
+    if: always()
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Close ServiceNow CR
+        run: |
+          python python/servicenow_cr.py close \
+            --cr-id "${{ needs.open-change.outputs.cr_number }}" \
+            --pipeline-url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+  # ────────────────────────────────────────────────────────────
+  # Job 5: Notify on failure
+  # ────────────────────────────────────────────────────────────
+  notify-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: [ansible-deploy, health-check]
+    if: failure()
+
+    steps:
+      - name: Post failure summary
+        run: |
+          echo "::error title=Deployment Failed::Pipeline run ${{ github.run_id }} failed."
+          echo "Review logs at: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "Rollback command:"
+          echo "  ansible-playbook ansible/playbooks/rollback.yml -i ansible/inventory/hosts.yml -e 'tenant_file=<tenant.yml>' -e 'target_host=prod-apic'"

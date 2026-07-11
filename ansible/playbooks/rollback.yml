@@ -1,0 +1,108 @@
+---
+# ============================================================
+# Playbook: rollback.yml
+#
+# Removes all ACI objects defined in a tenant YAML file.
+# Used when a deployment must be reversed.
+# Objects are deleted in reverse dependency order (security → networking → tenant).
+#
+# Usage:
+#   ansible-playbook playbooks/rollback.yml \
+#     -i inventory/hosts.yml \
+#     -e "tenant_file=../../tenants/prod-tenant.yml" \
+#     -e "target_host=devnet-sandbox"
+#
+# WARNING: This removes all objects defined in the tenant file from the APIC.
+#          Run with --check first to preview what will be deleted.
+# ============================================================
+
+- name: Rollback ACI Tenant
+  hosts: "{{ target_host | default('devnet-sandbox') }}"
+  gather_facts: false
+  connection: local
+
+  vars_files:
+    - "{{ tenant_file }}"
+
+  pre_tasks:
+    - name: Confirm rollback intent
+      ansible.builtin.pause:
+        prompt: >
+          WARNING: This will DELETE tenant '{{ tenant.name }}' and all its objects
+          from APIC {{ aci_hostname }}.
+          Type 'yes' to confirm or Ctrl+C to abort.
+      register: confirm
+      when: not ansible_check_mode
+
+    - name: Abort if not confirmed
+      ansible.builtin.fail:
+        msg: "Rollback aborted by user."
+      when:
+        - not ansible_check_mode
+        - confirm.user_input | lower != 'yes'
+
+  tasks:
+    - name: Remove contracts
+      cisco.aci.aci_contract:
+        host: "{{ aci_hostname }}"
+        username: "{{ aci_username }}"
+        password: "{{ aci_password }}"
+        validate_certs: "{{ aci_validate_certs }}"
+        use_ssl: "{{ aci_use_ssl }}"
+        tenant: "{{ tenant.name }}"
+        contract: "{{ item.name }}"
+        state: absent
+      loop: "{{ tenant.contracts }}"
+      when: tenant.contracts | length > 0
+
+    - name: Remove EPGs
+      cisco.aci.aci_epg:
+        host: "{{ aci_hostname }}"
+        username: "{{ aci_username }}"
+        password: "{{ aci_password }}"
+        validate_certs: "{{ aci_validate_certs }}"
+        use_ssl: "{{ aci_use_ssl }}"
+        tenant: "{{ tenant.name }}"
+        ap: "{{ item.0.name }}"
+        epg: "{{ item.1.name }}"
+        state: absent
+      loop: "{{ tenant.app_profiles | subelements('epgs') }}"
+      when: tenant.app_profiles | length > 0
+
+    - name: Remove bridge domains
+      cisco.aci.aci_bd:
+        host: "{{ aci_hostname }}"
+        username: "{{ aci_username }}"
+        password: "{{ aci_password }}"
+        validate_certs: "{{ aci_validate_certs }}"
+        use_ssl: "{{ aci_use_ssl }}"
+        tenant: "{{ tenant.name }}"
+        bd: "{{ item.name }}"
+        state: absent
+      loop: "{{ tenant.bridge_domains }}"
+
+    - name: Remove VRFs
+      cisco.aci.aci_vrf:
+        host: "{{ aci_hostname }}"
+        username: "{{ aci_username }}"
+        password: "{{ aci_password }}"
+        validate_certs: "{{ aci_validate_certs }}"
+        use_ssl: "{{ aci_use_ssl }}"
+        tenant: "{{ tenant.name }}"
+        vrf: "{{ item.name }}"
+        state: absent
+      loop: "{{ tenant.vrfs }}"
+
+    - name: Remove tenant
+      cisco.aci.aci_tenant:
+        host: "{{ aci_hostname }}"
+        username: "{{ aci_username }}"
+        password: "{{ aci_password }}"
+        validate_certs: "{{ aci_validate_certs }}"
+        use_ssl: "{{ aci_use_ssl }}"
+        tenant: "{{ tenant.name }}"
+        state: absent
+
+    - name: Rollback complete
+      ansible.builtin.debug:
+        msg: "Tenant '{{ tenant.name }}' and all associated objects removed from {{ aci_hostname }}."

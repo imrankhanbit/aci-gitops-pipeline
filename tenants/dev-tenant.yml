@@ -1,0 +1,42 @@
+# ============================================================
+# Tenant: ACME-DEV
+# Owner: network-automation-team
+# Environment: Development / non-production
+# Note: Unenforced VRF — EPGs communicate freely for dev flexibility
+# ============================================================
+
+tenant:
+  name: "ACME-DEV"
+  description: "ACME Corporation — Development workloads"
+  annotation: "orchestrated-by:aci-gitops-pipeline"
+
+  vrfs:
+    - name: "DEV-VRF"
+      description: "Dev VRF — unenforced for developer flexibility"
+      enforcement: unenforced
+      preferred_group: enabled
+
+  bridge_domains:
+    - name: "DEV-BD"
+      description: "Shared dev bridge domain"
+      vrf: "DEV-VRF"
+      gateway: "192.168.10.1"
+      mask: "24"
+      unicast_routing: true
+      arp_flooding: true
+      l2_unknown_unicast: flood
+
+  app_profiles:
+    - name: "DEV-APP"
+      description: "Development application stack"
+      epgs:
+        - name: "DEV-EPG"
+          description: "All dev workloads — open policy"
+          bd: "DEV-BD"
+          preferred_group: true
+          contracts:
+            provided: []
+            consumed: []
+
+  contracts: []
+  filters: []

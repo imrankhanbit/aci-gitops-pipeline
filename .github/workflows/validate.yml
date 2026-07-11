@@ -1,0 +1,172 @@
+# ============================================================
+# validate.yml — Pull Request Validation Pipeline
+#
+# Triggered on every PR that modifies tenant YAML files,
+# Ansible playbooks/roles, Terraform modules, or Python scripts.
+#
+# Stages:
+#   1. YAML lint         — tenant file syntax
+#   2. Ansible lint      — playbook best practices
+#   3. Terraform         — validate + plan (no apply)
+#   4. Python unit tests — pytest with mocked APIC
+#   5. Ansible dry-run   — check mode against DevNet sandbox
+# ============================================================
+
+name: Validate — PR Check
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "tenants/**"
+      - "ansible/**"
+      - "terraform/**"
+      - "python/**"
+      - ".github/workflows/validate.yml"
+
+env:
+  PYTHON_VERSION: "3.11"
+  TERRAFORM_VERSION: "1.6.6"
+
+jobs:
+
+  # ────────────────────────────────────────────────────────────
+  # Job 1: YAML Lint — validate tenant YAML file structure
+  # ────────────────────────────────────────────────────────────
+  yaml-lint:
+    name: YAML Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install yamllint
+        run: pip install yamllint
+
+      - name: Lint tenant YAML files
+        run: yamllint tenants/
+
+      - name: Lint Ansible files
+        run: yamllint ansible/
+
+  # ────────────────────────────────────────────────────────────
+  # Job 2: Ansible Lint
+  # ────────────────────────────────────────────────────────────
+  ansible-lint:
+    name: Ansible Lint
+    runs-on: ubuntu-latest
+    needs: yaml-lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Ansible and lint tools
+        run: |
+          pip install ansible-lint ansible
+          ansible-galaxy collection install -r ansible/ansible-requirements.yml
+
+      - name: Run ansible-lint
+        run: ansible-lint ansible/playbooks/ ansible/roles/
+
+  # ────────────────────────────────────────────────────────────
+  # Job 3: Terraform Validate and Plan
+  # ────────────────────────────────────────────────────────────
+  terraform:
+    name: Terraform Validate & Plan
+    runs-on: ubuntu-latest
+    needs: yaml-lint
+    env:
+      TF_VAR_apic_host: ${{ secrets.APIC_HOST }}
+      TF_VAR_apic_username: ${{ secrets.APIC_USERNAME }}
+      TF_VAR_apic_password: ${{ secrets.APIC_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform init (dev environment)
+        working-directory: terraform/environments/dev
+        run: terraform init -input=false
+
+      - name: Terraform validate
+        working-directory: terraform/environments/dev
+        run: terraform validate
+
+      - name: Terraform plan
+        working-directory: terraform/environments/dev
+        run: terraform plan -input=false -no-color
+        continue-on-error: false   # plan failure blocks merge
+
+  # ────────────────────────────────────────────────────────────
+  # Job 4: Python Unit Tests
+  # ────────────────────────────────────────────────────────────
+  pytest:
+    name: Python Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest pytest-cov
+
+      - name: Run tests
+        run: |
+          pytest python/tests/ \
+            --cov=python \
+            --cov-report=term-missing \
+            --cov-fail-under=80 \
+            -v
+
+  # ────────────────────────────────────────────────────────────
+  # Job 5: Ansible Dry-Run against DevNet sandbox
+  # Runs in check mode — queries the APIC but makes no changes.
+  # ────────────────────────────────────────────────────────────
+  dry-run:
+    name: Ansible Dry-Run (DevNet sandbox)
+    runs-on: ubuntu-latest
+    needs: [ansible-lint, pytest]
+    env:
+      APIC_USERNAME: ${{ secrets.APIC_USERNAME }}
+      APIC_PASSWORD: ${{ secrets.APIC_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Ansible and collections
+        run: |
+          pip install ansible
+          ansible-galaxy collection install -r ansible/ansible-requirements.yml
+
+      - name: Detect changed tenant files
+        id: changed-tenants
+        run: |
+          CHANGED=$(git diff --name-only origin/main...HEAD -- 'tenants/*.yml' | head -1)
+          echo "tenant_file=${CHANGED:-tenants/dev-tenant.yml}" >> "$GITHUB_OUTPUT"
+
+      - name: Dry-run provisioning playbook (check mode)
+        working-directory: ansible
+        run: |
+          ansible-playbook playbooks/provision_tenant.yml \
+            -i inventory/hosts.yml \
+            -e "tenant_file=../../${{ steps.changed-tenants.outputs.tenant_file }}" \
+            -e "target_host=devnet-sandbox" \
+            --check \
+            --diff \
+            -v

@@ -1,0 +1,74 @@
+---
+# Role: aci_tenant
+# Creates the ACI tenant, VRFs, and Bridge Domains defined in tenant.yml
+
+- name: Create tenant
+  cisco.aci.aci_tenant:
+    host: "{{ aci_hostname }}"
+    username: "{{ aci_username }}"
+    password: "{{ aci_password }}"
+    validate_certs: "{{ aci_validate_certs }}"
+    use_ssl: "{{ aci_use_ssl }}"
+    tenant: "{{ tenant.name }}"
+    description: "{{ tenant.description | default('') }}"
+    annotation: "{{ aci_annotation }}"
+    state: present
+  register: tenant_result
+
+- name: Create VRFs
+  cisco.aci.aci_vrf:
+    host: "{{ aci_hostname }}"
+    username: "{{ aci_username }}"
+    password: "{{ aci_password }}"
+    validate_certs: "{{ aci_validate_certs }}"
+    use_ssl: "{{ aci_use_ssl }}"
+    tenant: "{{ tenant.name }}"
+    vrf: "{{ item.name }}"
+    description: "{{ item.description | default('') }}"
+    policy_control_direction: ingress
+    policy_control_preference: "{{ item.enforcement | default('enforced') }}"
+    preferred_group: "{{ item.preferred_group | default('disabled') }}"
+    annotation: "{{ aci_annotation }}"
+    state: present
+  loop: "{{ tenant.vrfs }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Create Bridge Domains
+  cisco.aci.aci_bd:
+    host: "{{ aci_hostname }}"
+    username: "{{ aci_username }}"
+    password: "{{ aci_password }}"
+    validate_certs: "{{ aci_validate_certs }}"
+    use_ssl: "{{ aci_use_ssl }}"
+    tenant: "{{ tenant.name }}"
+    bd: "{{ item.name }}"
+    description: "{{ item.description | default('') }}"
+    vrf: "{{ item.vrf }}"
+    enable_routing: "{{ item.unicast_routing | default(true) }}"
+    arp_flooding: "{{ item.arp_flooding | default(false) }}"
+    l2_unknown_unicast: "{{ item.l2_unknown_unicast | default('proxy') }}"
+    annotation: "{{ aci_annotation }}"
+    state: present
+  loop: "{{ tenant.bridge_domains }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Create Bridge Domain subnets (gateways)
+  cisco.aci.aci_bd_subnet:
+    host: "{{ aci_hostname }}"
+    username: "{{ aci_username }}"
+    password: "{{ aci_password }}"
+    validate_certs: "{{ aci_validate_certs }}"
+    use_ssl: "{{ aci_use_ssl }}"
+    tenant: "{{ tenant.name }}"
+    bd: "{{ item.name }}"
+    gateway: "{{ item.gateway }}"
+    mask: "{{ item.mask }}"
+    scope: public
+    annotation: "{{ aci_annotation }}"
+    state: present
+  loop: "{{ tenant.bridge_domains }}"
+  loop_control:
+    label: "{{ item.name }} — {{ item.gateway }}/{{ item.mask }}"
+  when: item.gateway is defined

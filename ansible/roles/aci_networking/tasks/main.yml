@@ -1,0 +1,96 @@
+---
+# Role: aci_networking
+# Creates Application Profiles, EPGs, and EPG contract bindings
+
+- name: Create Application Profiles
+  cisco.aci.aci_ap:
+    host: "{{ aci_hostname }}"
+    username: "{{ aci_username }}"
+    password: "{{ aci_password }}"
+    validate_certs: "{{ aci_validate_certs }}"
+    use_ssl: "{{ aci_use_ssl }}"
+    tenant: "{{ tenant.name }}"
+    ap: "{{ item.name }}"
+    description: "{{ item.description | default('') }}"
+    annotation: "{{ aci_annotation }}"
+    state: present
+  loop: "{{ tenant.app_profiles }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Create EPGs
+  cisco.aci.aci_epg:
+    host: "{{ aci_hostname }}"
+    username: "{{ aci_username }}"
+    password: "{{ aci_password }}"
+    validate_certs: "{{ aci_validate_certs }}"
+    use_ssl: "{{ aci_use_ssl }}"
+    tenant: "{{ tenant.name }}"
+    ap: "{{ item.0.name }}"
+    epg: "{{ item.1.name }}"
+    description: "{{ item.1.description | default('') }}"
+    bd: "{{ item.1.bd }}"
+    preferred_group: "{{ item.1.preferred_group | default('no') }}"
+    annotation: "{{ aci_annotation }}"
+    state: present
+  loop: "{{ tenant.app_profiles | subelements('epgs') }}"
+  loop_control:
+    label: "{{ item.0.name }}/{{ item.1.name }}"
+
+- name: Bind provided contracts to EPGs
+  cisco.aci.aci_epg_to_contract:
+    host: "{{ aci_hostname }}"
+    username: "{{ aci_username }}"
+    password: "{{ aci_password }}"
+    validate_certs: "{{ aci_validate_certs }}"
+    use_ssl: "{{ aci_use_ssl }}"
+    tenant: "{{ tenant.name }}"
+    ap: "{{ item.0.ap }}"
+    epg: "{{ item.0.epg }}"
+    contract: "{{ item.1 }}"
+    contract_type: provider
+    annotation: "{{ aci_annotation }}"
+    state: present
+  loop: "{{ epg_provided_contracts }}"
+  loop_control:
+    label: "{{ item.0.epg }} provides {{ item.1 }}"
+  vars:
+    epg_provided_contracts: >-
+      {%- set result = [] -%}
+      {%- for ap in tenant.app_profiles -%}
+        {%- for epg in ap.epgs -%}
+          {%- for contract in epg.contracts.provided -%}
+            {%- set _ = result.append({'ap': ap.name, 'epg': epg.name, 'contract': contract}) -%}
+          {%- endfor -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ result }}
+
+- name: Bind consumed contracts to EPGs
+  cisco.aci.aci_epg_to_contract:
+    host: "{{ aci_hostname }}"
+    username: "{{ aci_username }}"
+    password: "{{ aci_password }}"
+    validate_certs: "{{ aci_validate_certs }}"
+    use_ssl: "{{ aci_use_ssl }}"
+    tenant: "{{ tenant.name }}"
+    ap: "{{ item.0.ap }}"
+    epg: "{{ item.0.epg }}"
+    contract: "{{ item.1 }}"
+    contract_type: consumer
+    annotation: "{{ aci_annotation }}"
+    state: present
+  loop: "{{ epg_consumed_contracts }}"
+  loop_control:
+    label: "{{ item.0.epg }} consumes {{ item.1 }}"
+  vars:
+    epg_consumed_contracts: >-
+      {%- set result = [] -%}
+      {%- for ap in tenant.app_profiles -%}
+        {%- for epg in ap.epgs -%}
+          {%- for contract in epg.contracts.consumed -%}
+            {%- set _ = result.append({'ap': ap.name, 'epg': epg.name, 'contract': contract}) -%}
+          {%- endfor -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ result }}

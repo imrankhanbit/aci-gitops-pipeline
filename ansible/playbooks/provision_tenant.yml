@@ -1,0 +1,58 @@
+---
+# ============================================================
+# Playbook: provision_tenant.yml
+#
+# Provisions a complete ACI tenant from a YAML definition file.
+# Idempotent — safe to run multiple times; only changes what has drifted.
+#
+# Usage:
+#   ansible-playbook playbooks/provision_tenant.yml \
+#     -i inventory/hosts.yml \
+#     -e "tenant_file=../../tenants/prod-tenant.yml" \
+#     -e "target_host=devnet-sandbox"
+#
+# Dry-run (check mode — no changes applied):
+#   ansible-playbook playbooks/provision_tenant.yml \
+#     -i inventory/hosts.yml \
+#     -e "tenant_file=../../tenants/prod-tenant.yml" \
+#     -e "target_host=devnet-sandbox" \
+#     --check --diff
+# ============================================================
+
+- name: Provision ACI Tenant from YAML definition
+  hosts: "{{ target_host | default('devnet-sandbox') }}"
+  gather_facts: false
+  connection: local
+
+  vars_files:
+    - "{{ tenant_file }}"
+
+  pre_tasks:
+    - name: Validate required variables are present
+      ansible.builtin.assert:
+        that:
+          - tenant is defined
+          - tenant.name is defined
+          - tenant.vrfs is defined
+        fail_msg: "tenant_file must define tenant.name and tenant.vrfs"
+
+    - name: Display deployment target
+      ansible.builtin.debug:
+        msg: >
+          Deploying tenant '{{ tenant.name }}' to APIC at {{ aci_hostname }}.
+          Mode: {{ 'CHECK (dry-run)' if ansible_check_mode else 'DEPLOY (live)' }}
+
+  roles:
+    - role: aci_tenant
+    - role: aci_networking
+    - role: aci_security
+
+  post_tasks:
+    - name: Deployment summary
+      ansible.builtin.debug:
+        msg: >
+          Tenant '{{ tenant.name }}' provisioning complete.
+          VRFs: {{ tenant.vrfs | length }}
+          Bridge Domains: {{ tenant.bridge_domains | length }}
+          App Profiles: {{ tenant.app_profiles | length }}
+          Contracts: {{ tenant.contracts | length }}

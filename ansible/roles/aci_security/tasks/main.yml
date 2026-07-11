@@ -1,0 +1,104 @@
+---
+# Role: aci_security
+# Creates contract filters, contracts, and contract subjects
+
+- name: Create filters
+  cisco.aci.aci_filter:
+    host: "{{ aci_hostname }}"
+    username: "{{ aci_username }}"
+    password: "{{ aci_password }}"
+    validate_certs: "{{ aci_validate_certs }}"
+    use_ssl: "{{ aci_use_ssl }}"
+    tenant: "{{ tenant.name }}"
+    filter: "{{ item.name }}"
+    annotation: "{{ aci_annotation }}"
+    state: present
+  loop: "{{ tenant.filters }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: tenant.filters | length > 0
+
+- name: Create filter entries
+  cisco.aci.aci_filter_entry:
+    host: "{{ aci_hostname }}"
+    username: "{{ aci_username }}"
+    password: "{{ aci_password }}"
+    validate_certs: "{{ aci_validate_certs }}"
+    use_ssl: "{{ aci_use_ssl }}"
+    tenant: "{{ tenant.name }}"
+    filter: "{{ item.0.name }}"
+    entry: "{{ item.1.name }}"
+    ether_type: "{{ item.1.ethertype | default('ip') }}"
+    ip_protocol: "{{ item.1.ip_protocol | default('tcp') }}"
+    dst_port_start: "{{ item.1.dest_from_port | default('unspecified') }}"
+    dst_port_end: "{{ item.1.dest_to_port | default('unspecified') }}"
+    annotation: "{{ aci_annotation }}"
+    state: present
+  loop: "{{ tenant.filters | subelements('entries') }}"
+  loop_control:
+    label: "{{ item.0.name }}/{{ item.1.name }}"
+  when: tenant.filters | length > 0
+
+- name: Create contracts
+  cisco.aci.aci_contract:
+    host: "{{ aci_hostname }}"
+    username: "{{ aci_username }}"
+    password: "{{ aci_password }}"
+    validate_certs: "{{ aci_validate_certs }}"
+    use_ssl: "{{ aci_use_ssl }}"
+    tenant: "{{ tenant.name }}"
+    contract: "{{ item.name }}"
+    description: "{{ item.description | default('') }}"
+    scope: "{{ item.scope | default('tenant') }}"
+    annotation: "{{ aci_annotation }}"
+    state: present
+  loop: "{{ tenant.contracts }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: tenant.contracts | length > 0
+
+- name: Create contract subjects
+  cisco.aci.aci_contract_subject:
+    host: "{{ aci_hostname }}"
+    username: "{{ aci_username }}"
+    password: "{{ aci_password }}"
+    validate_certs: "{{ aci_validate_certs }}"
+    use_ssl: "{{ aci_use_ssl }}"
+    tenant: "{{ tenant.name }}"
+    contract: "{{ item.0.name }}"
+    subject: "{{ item.1.name }}"
+    annotation: "{{ aci_annotation }}"
+    state: present
+  loop: "{{ tenant.contracts | subelements('subjects') }}"
+  loop_control:
+    label: "{{ item.0.name }}/{{ item.1.name }}"
+  when: tenant.contracts | length > 0
+
+- name: Bind filters to contract subjects
+  cisco.aci.aci_contract_subject_to_filter:
+    host: "{{ aci_hostname }}"
+    username: "{{ aci_username }}"
+    password: "{{ aci_password }}"
+    validate_certs: "{{ aci_validate_certs }}"
+    use_ssl: "{{ aci_use_ssl }}"
+    tenant: "{{ tenant.name }}"
+    contract: "{{ item.0.contract }}"
+    subject: "{{ item.0.subject }}"
+    filter: "{{ item.1 }}"
+    annotation: "{{ aci_annotation }}"
+    state: present
+  loop: "{{ subject_filter_bindings }}"
+  loop_control:
+    label: "{{ item.0.contract }}/{{ item.0.subject }} -> {{ item.1 }}"
+  vars:
+    subject_filter_bindings: >-
+      {%- set result = [] -%}
+      {%- for contract in tenant.contracts -%}
+        {%- for subject in contract.subjects -%}
+          {%- for filter in subject.filters -%}
+            {%- set _ = result.append({'contract': contract.name, 'subject': subject.name, 'filter': filter}) -%}
+          {%- endfor -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ result }}
+  when: tenant.contracts | length > 0

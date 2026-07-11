@@ -1,0 +1,73 @@
+---
+# ============================================================
+# Playbook: validate_fabric.yml
+#
+# Read-only validation of ACI fabric health.
+# Fails the pipeline if critical faults are found.
+# Run as a post-deploy gate before closing the ServiceNow CR.
+#
+# Usage:
+#   ansible-playbook playbooks/validate_fabric.yml \
+#     -i inventory/hosts.yml \
+#     -e "target_host=devnet-sandbox"
+# ============================================================
+
+- name: Validate ACI Fabric Health
+  hosts: "{{ target_host | default('devnet-sandbox') }}"
+  gather_facts: false
+  connection: local
+
+  vars:
+    fault_severity_threshold: critical   # fail on: critical | major | minor
+
+  tasks:
+    - name: Query fabric node health
+      cisco.aci.aci_rest:
+        host: "{{ aci_hostname }}"
+        username: "{{ aci_username }}"
+        password: "{{ aci_password }}"
+        validate_certs: "{{ aci_validate_certs }}"
+        use_ssl: "{{ aci_use_ssl }}"
+        path: /api/node/class/fabricNode.json?order-by=fabricNode.id
+        method: get
+      register: fabric_nodes
+
+    - name: Display fabric nodes
+      ansible.builtin.debug:
+        msg: >
+          Node {{ item.fabricNode.attributes.id }}
+          ({{ item.fabricNode.attributes.role }})
+          — {{ item.fabricNode.attributes.fabricSt }}
+        loop: "{{ fabric_nodes.imdata }}"
+
+    - name: Check for nodes not in 'active' state
+      ansible.builtin.fail:
+        msg: >
+          Node {{ item.fabricNode.attributes.id }} is in state
+          '{{ item.fabricNode.attributes.fabricSt }}' — expected 'active'.
+          Investigate before proceeding.
+      when: item.fabricNode.attributes.fabricSt != 'active'
+      loop: "{{ fabric_nodes.imdata }}"
+
+    - name: Query critical faults
+      cisco.aci.aci_rest:
+        host: "{{ aci_hostname }}"
+        username: "{{ aci_username }}"
+        password: "{{ aci_password }}"
+        validate_certs: "{{ aci_validate_certs }}"
+        use_ssl: "{{ aci_use_ssl }}"
+        path: /api/node/class/faultSummary.json?query-target-filter=and(eq(faultSummary.severity,"critical"))
+        method: get
+      register: critical_faults
+
+    - name: Fail if critical faults found
+      ansible.builtin.fail:
+        msg: >
+          {{ critical_faults.imdata | length }} critical fault(s) found on fabric.
+          Review faults on the APIC before marking change as complete.
+          Fault codes: {{ critical_faults.imdata | map(attribute='faultSummary.attributes.code') | list }}
+      when: critical_faults.imdata | length > 0
+
+    - name: Fabric health validated — no critical faults
+      ansible.builtin.debug:
+        msg: "Fabric health check passed. No critical faults found."

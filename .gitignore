@@ -1,0 +1,36 @@
+# Credentials — never commit these
+.env
+*.env
+.snow_cr_sysid
+.snow_cr_number
+
+# Terraform state
+*.tfstate
+*.tfstate.backup
+*.tfstate.lock.info
+.terraform/
+.terraform.lock.hcl
+terraform/environments/**/.terraform/
+terraform/environments/**/*.tfstate
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg
+
+# Ansible
+*.retry
+ansible/roles/*/tests/tmp/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo

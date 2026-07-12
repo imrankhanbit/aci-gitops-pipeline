@@ -135,18 +135,12 @@ jobs:
           pip install ansible
           ansible-galaxy collection install -r ansible/ansible-requirements.yml
 
-      - name: Detect changed tenant files
-        id: changed-tenants
-        run: |
-          CHANGED=$(git diff --name-only origin/main...HEAD -- 'tenants/*.yml' | head -1)
-          echo "tenant_file=${CHANGED:-tenants/dev-tenant.yml}" >> "$GITHUB_OUTPUT"
-
       - name: Dry-run provisioning playbook (check mode)
         working-directory: ansible
         run: |
           ansible-playbook playbooks/provision_tenant.yml \
             -i inventory/hosts.yml \
-            -e "tenant_file=../../${{ steps.changed-tenants.outputs.tenant_file }}" \
+            -e "tenant_file=../../tenants/dev-tenant.yml" \
             -e "target_host=devnet-sandbox" \
             --check \
             --diff \

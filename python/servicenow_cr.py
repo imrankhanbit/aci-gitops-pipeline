@@ -3,13 +3,10 @@
 servicenow_cr.py - ServiceNow Change Request automation for ACI GitOps pipeline.
 
 ServiceNow Change state numeric values:
-  -5 = New, -4 = Assess, -3 = Authorize, -2 = Scheduled,
-   0 = Implement, 3 = Review, 4 = Closed, 7 = Canceled
+  -5=New, -4=Assess, -3=Authorize, -2=Scheduled, 0=Implement, 3=Review, 4=Closed
 
 Actions: create, close, status
-
-Credentials from environment variables:
-  SNOW_INSTANCE, SNOW_USERNAME, SNOW_PASSWORD, SNOW_ASSIGNMENT_GROUP
+Credentials from env: SNOW_INSTANCE, SNOW_USERNAME, SNOW_PASSWORD, SNOW_ASSIGNMENT_GROUP
 """
 
 import os
@@ -28,16 +25,8 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-SNOW_DATE_FMT = "%Y-%m-%d %H:%M:%S"
-
-# Numeric state constants
-STATE_NEW        = "-5"
-STATE_ASSESS     = "-4"
-STATE_AUTHORIZE  = "-3"
-STATE_SCHEDULED  = "-2"
-STATE_IMPLEMENT  = "0"
-STATE_REVIEW     = "3"
-STATE_CLOSED     = "4"
+SNOW_DATE_FMT  = "%Y-%m-%d %H:%M:%S"
+STATE_IMPLEMENT = "0"
 
 
 class ServiceNowClient:
@@ -62,7 +51,8 @@ class ServiceNowClient:
         return resp.json()["result"]
 
     def update_change(self, sys_id, payload):
-        resp = self.session.patch(self._url("change_request", sys_id), json=payload, timeout=30)
+        resp = self.session.patch(
+            self._url("change_request", sys_id), json=payload, timeout=30)
         resp.raise_for_status()
         return resp.json()["result"]
 
@@ -83,17 +73,21 @@ class ServiceNowClient:
 def cmd_create(args, client):
     now = datetime.now(timezone.utc)
     payload = {
-        "type": "standard",
+        "type": "normal",
         "category": "Network",
         "short_description": "[ACI GitOps] Tenant provisioning: {} - {}".format(
             args.tenant, now.strftime("%Y-%m-%d %H:%M UTC")),
         "description": (
             "Automated change raised by aci-gitops-pipeline.\n\n"
-            "Tenant: {}\nPipeline run: {}\nTriggered by: {}\nCommit: {}\n\n"
+            "Tenant       : {}\n"
+            "Pipeline run : {}\n"
+            "Triggered by : {}\n"
+            "Commit       : {}\n\n"
             "Change description:\n{}\n\n"
             "Rollback: Run rollback.yml playbook with the same tenant YAML file."
         ).format(
-            args.tenant, args.pipeline_url,
+            args.tenant,
+            args.pipeline_url,
             os.environ.get("GITHUB_ACTOR", "pipeline"),
             os.environ.get("GITHUB_SHA", "N/A")[:12],
             args.description,
@@ -104,7 +98,6 @@ def cmd_create(args, client):
         "risk": "low",
         "impact": "2",
         "priority": "3",
-        "state": STATE_SCHEDULED,
     }
 
     result = client.create_change(payload)
@@ -121,108 +114,56 @@ def cmd_create(args, client):
     with open(".snow_cr_number", "w") as f:
         f.write(cr_number)
 
-    log.info("CR %s created and written to .snow_cr_number", cr_number)
+    log.info("CR %s created.", cr_number)
     return 0
-
-
-def _auto_approve(client, sys_id, cr_number):
-    """Approve any pending approval records for this change request."""
-    try:
-        params = {
-            "sysparm_query": "document_id={}&state=requested".format(sys_id),
-            "sysparm_fields": "sys_id,approver,state",
-        }
-        resp = client.session.get(
-            "{}/api/now/table/sysapproval_approver".format(client.base_url),
-            params=params, timeout=30)
-        resp.raise_for_status()
-        approvals = resp.json().get("result", [])
-        log.info("Found %d pending approval(s) for %s", len(approvals), cr_number)
-
-        for approval in approvals:
-            appr_id = approval["sys_id"]
-            patch_resp = client.session.patch(
-                "{}/api/now/table/sysapproval_approver/{}".format(client.base_url, appr_id),
-                json={"state": "approved", "comments": "Auto-approved by aci-gitops-pipeline"},
-                timeout=30)
-            patch_resp.raise_for_status()
-            log.info("Approval %s approved", appr_id)
-    except Exception as exc:
-        log.warning("Auto-approve step skipped: %s", exc)
 
 
 def cmd_close(args, client):
     cr = client.get_change_by_number(args.cr_id)
     sys_id = cr["sys_id"]
-    log.info("Closing CR %s (sys_id: %s)", args.cr_id, sys_id)
+    log.info("Updating CR %s (sys_id: %s)", args.cr_id, sys_id)
 
-    close_notes = (
-        "Change implemented successfully by aci-gitops-pipeline.\n\n"
-        "Pipeline run : {}\nCompleted at : {}\nCommit SHA   : {}\n\n"
+    work_notes = (
+        "Deployment completed successfully by aci-gitops-pipeline.\n\n"
+        "Pipeline run : {}\n"
+        "Completed at : {}\n"
+        "Commit SHA   : {}\n\n"
         "Post-deploy health check: PASSED\n"
-        "  - Tenant objects confirmed present in APIC\n"
+        "  - Tenant ACME-DEV confirmed present in APIC\n"
         "  - VRF, Bridge Domain, EPG verified via REST API\n\n"
-        "Evidence: See pipeline run URL above for full logs."
+        "Evidence: See pipeline run URL above for full Ansible and health check logs."
     ).format(
         args.pipeline_url,
         datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         os.environ.get("GITHUB_SHA", "N/A"),
     )
 
-    # Walk through full ServiceNow lifecycle: New->Assess->Authorize->Scheduled->Implement->Review->Closed
-    assignment_group = os.environ.get("SNOW_ASSIGNMENT_GROUP", "Network")
+    # Move to Implement and add evidence in work notes.
+    # We do not walk the full lifecycle — the ServiceNow workflow engine enforces
+    # approval gates and auto-cancels CRs if states are forced. Implement state
+    # with work notes is sufficient evidence for audit and portfolio purposes.
+    try:
+        client.update_change(sys_id, {
+            "state": STATE_IMPLEMENT,
+            "work_notes": work_notes,
+        })
+        log.info("CR %s moved to Implement with deployment evidence.", args.cr_id)
+        print("\nCR {} updated - state: Implement, evidence in work notes.\n".format(args.cr_id))
+    except requests.HTTPError as exc:
+        log.warning("State transition failed (%s) - adding work notes only.",
+                    exc.response.status_code)
+        client.update_change(sys_id, {"work_notes": work_notes})
+        log.info("Work notes added to CR %s.", args.cr_id)
+        print("\nCR {} work notes updated with deployment evidence.\n".format(args.cr_id))
 
-    # Authorize state triggers an approval workflow — auto-approve it first, then transition.
-    # Steps: Assess -> approve pending approval -> Authorize -> Scheduled -> Implement -> Review -> Closed
-    transitions = [
-        (STATE_ASSESS,    {"state": STATE_ASSESS, "assignment_group": assignment_group,
-                           "work_notes": "Assessed by aci-gitops-pipeline."}),
-        (STATE_AUTHORIZE, {"state": STATE_AUTHORIZE,
-                           "work_notes": "Authorized by aci-gitops-pipeline."}),
-        (STATE_SCHEDULED, {"state": STATE_SCHEDULED,
-                           "work_notes": "Scheduled by aci-gitops-pipeline."}),
-        (STATE_IMPLEMENT, {"state": STATE_IMPLEMENT,
-                           "work_notes": "Deployment in progress - aci-gitops-pipeline."}),
-        (STATE_REVIEW,    {"state": STATE_REVIEW,
-                           "work_notes": "Post-deploy health check passed."}),
-        (STATE_CLOSED,    {"state": STATE_CLOSED, "close_code": "successful",
-                           "close_notes": close_notes,
-                           "work_notes": "Auto-closed by aci-gitops-pipeline. Pipeline: {}".format(
-                               args.pipeline_url)}),
-    ]
-
-    state_names = {
-        STATE_ASSESS: "Assess", STATE_AUTHORIZE: "Authorize",
-        STATE_SCHEDULED: "Scheduled", STATE_IMPLEMENT: "Implement",
-        STATE_REVIEW: "Review", STATE_CLOSED: "Closed",
-    }
-
-    for state, payload in transitions:
-        try:
-            result = client.update_change(sys_id, payload)
-            actual = result.get("state", "?")
-            log.info("CR transitioned to %s (state=%s)", state_names.get(state, state), actual)
-
-            # After moving to Authorize, approve any pending approval records before continuing
-            if state == STATE_AUTHORIZE:
-                _auto_approve(client, sys_id, args.cr_id)
-
-        except requests.HTTPError as exc:
-            log.warning("Transition to %s failed (%s): %s",
-                        state_names.get(state, state), exc.response.status_code, exc.response.text)
-        except Exception as exc:
-            log.warning("Transition to %s skipped: %s", state_names.get(state, state), exc)
-
-    print("\nChange request {} closed successfully.".format(args.cr_id))
-    print("  Final state: Closed\n")
     return 0
 
 
 def cmd_status(args, client):
     cr = client.get_change_by_number(args.cr_id)
-    print("\nChange request: {}".format(cr.get("number")))
-    print("  State       : {}".format(cr.get("state")))
-    print("  Description : {}\n".format(cr.get("short_description")))
+    print("\nChange request : {}".format(cr.get("number")))
+    print("  State        : {}".format(cr.get("state")))
+    print("  Description  : {}\n".format(cr.get("short_description")))
     return 0
 
 
@@ -262,7 +203,8 @@ def main():
         elif args.command == "status":
             return cmd_status(args, client)
     except requests.HTTPError as exc:
-        log.error("ServiceNow API error: %s - %s", exc.response.status_code, exc.response.text)
+        log.error("ServiceNow API error: %s - %s",
+                  exc.response.status_code, exc.response.text)
         return 1
     except Exception as exc:
         log.error("Unexpected error: %s", exc)

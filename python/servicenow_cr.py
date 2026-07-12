@@ -24,6 +24,23 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+MAX_RETRIES = 5
+RETRY_DELAY = 15   # seconds between retries
+
+
+def api_call_with_retry(fn, *args, **kwargs):
+    """Retry an API call up to MAX_RETRIES times on connection/timeout errors."""
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return fn(*args, **kwargs)
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError) as exc:
+            if attempt == MAX_RETRIES:
+                raise
+            log.warning("API timeout/connection error (attempt %d/%d): %s. "
+                        "Retrying in %ds...", attempt, MAX_RETRIES, exc, RETRY_DELAY)
+            time.sleep(RETRY_DELAY)
+
 SNOW_DATE_FMT = "%Y-%m-%d %H:%M:%S"
 
 # ServiceNow Change Request numeric state values
@@ -54,21 +71,23 @@ class ServiceNowClient:
         return "{}{}".format(self.base_url, path)
 
     def create_change(self, payload):
-        resp = self.session.post(self._url("change_request"), json=payload, timeout=30)
+        resp = api_call_with_retry(
+            self.session.post, self._url("change_request"), json=payload, timeout=60)
         resp.raise_for_status()
         return resp.json()["result"]
 
     def update_change(self, sys_id, payload):
-        resp = self.session.patch(
-            self._url("change_request", sys_id), json=payload, timeout=30)
+        resp = api_call_with_retry(
+            self.session.patch, self._url("change_request", sys_id),
+            json=payload, timeout=60)
         resp.raise_for_status()
         return resp.json()["result"]
 
     def get_change(self, sys_id):
-        resp = self.session.get(
-            self._url("change_request", sys_id),
+        resp = api_call_with_retry(
+            self.session.get, self._url("change_request", sys_id),
             params={"sysparm_fields": "sys_id,number,state,short_description"},
-            timeout=30)
+            timeout=60)
         resp.raise_for_status()
         return resp.json()["result"]
 
@@ -78,7 +97,9 @@ class ServiceNowClient:
             "sysparm_limit": 1,
             "sysparm_fields": "sys_id,number,state,short_description",
         }
-        resp = self.session.get(self._url("change_request"), params=params, timeout=30)
+        resp = api_call_with_retry(
+            self.session.get, self._url("change_request"),
+            params=params, timeout=60)
         resp.raise_for_status()
         results = resp.json()["result"]
         if not results:
@@ -90,19 +111,37 @@ class ServiceNowClient:
             "sysparm_query": "document_id={}&state=requested".format(sys_id),
             "sysparm_fields": "sys_id,approver,state",
         }
-        resp = self.session.get(
-            self._url("sysapproval_approver"), params=params, timeout=30)
+        resp = api_call_with_retry(
+            self.session.get, self._url("sysapproval_approver"),
+            params=params, timeout=60)
         resp.raise_for_status()
         return resp.json().get("result", [])
 
     def approve_record(self, approval_sys_id):
-        resp = self.session.patch(
+        resp = api_call_with_retry(
+            self.session.patch,
             self._url("sysapproval_approver", approval_sys_id),
             json={"state": "approved",
                   "comments": "Auto-approved by aci-gitops-pipeline CI/CD."},
-            timeout=30)
+            timeout=60)
         resp.raise_for_status()
         return resp.json()["result"]
+
+    def ping(self):
+        """Wake up the instance by hitting a lightweight endpoint."""
+        for attempt in range(10):
+            try:
+                resp = self.session.get(
+                    "{}/api/now/table/sys_properties?sysparm_limit=1".format(self.base_url),
+                    timeout=60)
+                if resp.status_code == 200:
+                    log.info("ServiceNow instance is awake.")
+                    return True
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+                pass
+            log.warning("Instance not ready, retrying in 20s... (%d/10)", attempt + 1)
+            time.sleep(20)
+        return False
 
 
 def transition(client, sys_id, cr_number, target_state, label, extra=None):
@@ -153,6 +192,11 @@ def cmd_create(args, client):
         "impact": "2",
         "priority": "3",
     }
+    log.info("Pinging ServiceNow instance to ensure it is awake...")
+    if not client.ping():
+        log.error("ServiceNow instance did not respond. Is the PDI running?")
+        return 1
+
     result = client.create_change(payload)
     cr_number = result["number"]
     sys_id    = result["sys_id"]
@@ -214,6 +258,8 @@ def cmd_create(args, client):
 
 def cmd_close(args, client):
     """Walk CR: Implement -> Review -> Closed with close_code and close_notes."""
+    log.info("Pinging ServiceNow instance to ensure it is awake...")
+    client.ping()
     cr = client.get_change_by_number(args.cr_id)
     sys_id = cr["sys_id"]
     log.info("Closing CR %s", args.cr_id)

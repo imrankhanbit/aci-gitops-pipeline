@@ -13,7 +13,7 @@
     description: "{{ tenant.description | default('') }}"
     annotation: "{{ aci_annotation }}"
     state: present
-  register: tenant_result
+  register: aci_tenant_result
 
 - name: Create VRFs
   cisco.aci.aci_vrf:

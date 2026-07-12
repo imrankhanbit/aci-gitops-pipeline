@@ -1,0 +1,17 @@
+---
+# ansible-lint configuration
+# https://ansible-lint.readthedocs.io/configuring/
+
+profile: moderate
+
+skip_list:
+  - yaml[truthy]          # allow true/false in addition to yes/no
+  - yaml[line-length]     # long lines acceptable in network automation tasks
+  - name[template]        # allow Jinja2 in task names for clarity
+  - no-changed-when       # APIC REST calls are idempotent by design
+
+warn_list:
+  - experimental
+
+exclude_paths:
+  - .cache/

@@ -50,7 +50,8 @@ jobs:
           ansible-galaxy collection install -r ansible/ansible-requirements.yml
 
       - name: Run ansible-lint
-        run: ansible-lint ansible/playbooks/ ansible/roles/
+        working-directory: ansible
+        run: ansible-lint playbooks/ roles/
 
   # ────────────────────────────────────────────────────────────
   # Job 3: Terraform Validate and Plan

@@ -9,6 +9,8 @@ skip_list:
   - yaml[line-length]     # long lines acceptable in network automation tasks
   - name[template]        # allow Jinja2 in task names for clarity
   - no-changed-when       # APIC REST calls are idempotent by design
+  - meta-runtime          # meta/runtime.yml not required for non-Galaxy roles
+  - name[casing]          # network task names use ALL-CAPS identifiers
 
 warn_list:
   - experimental

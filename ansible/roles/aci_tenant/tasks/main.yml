@@ -71,4 +71,5 @@
   loop: "{{ tenant.bridge_domains }}"
   loop_control:
     label: "{{ item.name }} — {{ item.gateway }}/{{ item.mask }}"
-  when: item.gateway is defined
+  when: item.gateway is defin
+d

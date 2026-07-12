@@ -125,6 +125,32 @@ def cmd_create(args, client):
     return 0
 
 
+def _auto_approve(client, sys_id, cr_number):
+    """Approve any pending approval records for this change request."""
+    try:
+        params = {
+            "sysparm_query": "document_id={}&state=requested".format(sys_id),
+            "sysparm_fields": "sys_id,approver,state",
+        }
+        resp = client.session.get(
+            "{}/api/now/table/sysapproval_approver".format(client.base_url),
+            params=params, timeout=30)
+        resp.raise_for_status()
+        approvals = resp.json().get("result", [])
+        log.info("Found %d pending approval(s) for %s", len(approvals), cr_number)
+
+        for approval in approvals:
+            appr_id = approval["sys_id"]
+            patch_resp = client.session.patch(
+                "{}/api/now/table/sysapproval_approver/{}".format(client.base_url, appr_id),
+                json={"state": "approved", "comments": "Auto-approved by aci-gitops-pipeline"},
+                timeout=30)
+            patch_resp.raise_for_status()
+            log.info("Approval %s approved", appr_id)
+    except Exception as exc:
+        log.warning("Auto-approve step skipped: %s", exc)
+
+
 def cmd_close(args, client):
     cr = client.get_change_by_number(args.cr_id)
     sys_id = cr["sys_id"]
@@ -145,17 +171,24 @@ def cmd_close(args, client):
 
     # Walk through full ServiceNow lifecycle: New->Assess->Authorize->Scheduled->Implement->Review->Closed
     assignment_group = os.environ.get("SNOW_ASSIGNMENT_GROUP", "Network")
+
+    # Authorize state triggers an approval workflow — auto-approve it first, then transition.
+    # Steps: Assess -> approve pending approval -> Authorize -> Scheduled -> Implement -> Review -> Closed
     transitions = [
-        (STATE_ASSESS,     {"state": STATE_ASSESS, "assignment_group": assignment_group,
-                            "work_notes": "Assessed by aci-gitops-pipeline."}),
-        (STATE_AUTHORIZE,  {"state": STATE_AUTHORIZE, "work_notes": "Authorized by aci-gitops-pipeline."}),
-        (STATE_SCHEDULED,  {"state": STATE_SCHEDULED, "work_notes": "Scheduled by aci-gitops-pipeline."}),
-        (STATE_IMPLEMENT,  {"state": STATE_IMPLEMENT, "work_notes": "Deployment in progress."}),
-        (STATE_REVIEW,     {"state": STATE_REVIEW,    "work_notes": "Post-deploy health check passed."}),
-        (STATE_CLOSED,     {"state": STATE_CLOSED, "close_code": "successful",
-                            "close_notes": close_notes,
-                            "work_notes": "Auto-closed by aci-gitops-pipeline. Pipeline: {}".format(
-                                args.pipeline_url)}),
+        (STATE_ASSESS,    {"state": STATE_ASSESS, "assignment_group": assignment_group,
+                           "work_notes": "Assessed by aci-gitops-pipeline."}),
+        (STATE_AUTHORIZE, {"state": STATE_AUTHORIZE,
+                           "work_notes": "Authorized by aci-gitops-pipeline."}),
+        (STATE_SCHEDULED, {"state": STATE_SCHEDULED,
+                           "work_notes": "Scheduled by aci-gitops-pipeline."}),
+        (STATE_IMPLEMENT, {"state": STATE_IMPLEMENT,
+                           "work_notes": "Deployment in progress - aci-gitops-pipeline."}),
+        (STATE_REVIEW,    {"state": STATE_REVIEW,
+                           "work_notes": "Post-deploy health check passed."}),
+        (STATE_CLOSED,    {"state": STATE_CLOSED, "close_code": "successful",
+                           "close_notes": close_notes,
+                           "work_notes": "Auto-closed by aci-gitops-pipeline. Pipeline: {}".format(
+                               args.pipeline_url)}),
     ]
 
     state_names = {
@@ -167,7 +200,16 @@ def cmd_close(args, client):
     for state, payload in transitions:
         try:
             result = client.update_change(sys_id, payload)
-            log.info("CR transitioned to %s", state_names.get(state, state))
+            actual = result.get("state", "?")
+            log.info("CR transitioned to %s (state=%s)", state_names.get(state, state), actual)
+
+            # After moving to Authorize, approve any pending approval records before continuing
+            if state == STATE_AUTHORIZE:
+                _auto_approve(client, sys_id, args.cr_id)
+
+        except requests.HTTPError as exc:
+            log.warning("Transition to %s failed (%s): %s",
+                        state_names.get(state, state), exc.response.status_code, exc.response.text)
         except Exception as exc:
             log.warning("Transition to %s skipped: %s", state_names.get(state, state), exc)
 

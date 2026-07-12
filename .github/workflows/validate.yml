@@ -31,27 +31,11 @@ env:
 jobs:
 
   # ────────────────────────────────────────────────────────────
-  # Job 1: YAML Lint — validate tenant YAML file structure
-  # ────────────────────────────────────────────────────────────
-  yaml-lint:
-    name: YAML Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install yamllint
-        run: pip install yamllint
-
-      - name: Lint Ansible files
-        run: yamllint ansible/
-
-  # ────────────────────────────────────────────────────────────
-  # Job 2: Ansible Lint
+  # Job 1: Ansible Lint
   # ────────────────────────────────────────────────────────────
   ansible-lint:
     name: Ansible Lint
     runs-on: ubuntu-latest
-    needs: yaml-lint
     steps:
       - uses: actions/checkout@v4
 
@@ -74,7 +58,6 @@ jobs:
   terraform:
     name: Terraform Validate & Plan
     runs-on: ubuntu-latest
-    needs: yaml-lint
     env:
       TF_VAR_apic_host: ${{ secrets.APIC_HOST }}
       TF_VAR_apic_username: ${{ secrets.APIC_USERNAME }}

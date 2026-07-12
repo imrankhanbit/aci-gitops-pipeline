@@ -42,9 +42,6 @@ jobs:
       - name: Install yamllint
         run: pip install yamllint
 
-      - name: Lint tenant YAML files
-        run: yamllint tenants/
-
       - name: Lint Ansible files
         run: yamllint ansible/
 

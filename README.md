@@ -1,5 +1,8 @@
 # ACI GitOps Pipeline
 
+[![Validate — PR Check](https://github.com/imrankhanbit/aci-gitops-pipeline/actions/workflows/validate.yml/badge.svg)](https://github.com/imrankhanbit/aci-gitops-pipeline/actions/workflows/validate.yml)
+[![Deploy — Merge to Main](https://github.com/imrankhanbit/aci-gitops-pipeline/actions/workflows/deploy.yml/badge.svg)](https://github.com/imrankhanbit/aci-gitops-pipeline/actions/workflows/deploy.yml)
+
 A production-grade GitOps pipeline for Cisco ACI tenant provisioning. Tenant configurations are declared as YAML files, validated and deployed through a GitHub Actions CI/CD pipeline, with automated ServiceNow change management and post-deploy health checks.
 
 ---
@@ -16,18 +19,19 @@ A production-grade GitOps pipeline for Cisco ACI tenant provisioning. Tenant con
           ▼                  ▼                         ▼
    tenants/*.yml      GitHub Actions            GitHub Actions
    (source of truth)   validate.yml              deploy.yml
-                       ┌──────────┐            ┌─────────────┐
-                       │ lint     │            │ ServiceNow  │
-                       │ tf plan  │            │ CR created  │
-                       │ pytest   │            │     ↓       │
-                       │ dry-run  │            │ Ansible     │
-                       │ (DevNet) │            │ deploys to  │
-                       └──────────┘            │ APIC        │
-                                               │     ↓       │
-                                               │ Health check│
-                                               │     ↓       │
-                                               │ CR closed   │
-                                               └─────────────┘
+                       ┌──────────┐            ┌─────────────────┐
+                       │ YAML lint│            │ Open ServiceNow │
+                       │ Ans lint │            │ CR (New→Sched.) │
+                       │ TF plan  │            │       ↓         │
+                       │ pytest   │            │ Ansible deploy  │
+                       │ dry-run  │            │ to Cisco APIC   │
+                       └──────────┘            │       ↓         │
+                                               │ Health check    │
+                                               │ (APIC REST API) │
+                                               │       ↓         │
+                                               │ Close CR        │
+                                               │ (Impl→Closed)   │
+                                               └─────────────────┘
 ```
 
 ## What this demonstrates
@@ -39,7 +43,7 @@ A production-grade GitOps pipeline for Cisco ACI tenant provisioning. Tenant con
 | Infrastructure as Code | Terraform `CiscoDevNet/aci` provider |
 | CI/CD pipeline | GitHub Actions — lint, validate, dry-run, deploy |
 | APIC REST API | Python scripts for health checks and fabric inventory |
-| ServiceNow integration | Auto CR creation and evidence capture via REST API |
+| ServiceNow integration | Full CR lifecycle: New → Assess → Authorize → Scheduled → Implement → Review → Closed |
 | Testing | `ansible-lint`, `terraform validate`, `pytest` with mocked APIC responses |
 
 ---
@@ -49,52 +53,47 @@ A production-grade GitOps pipeline for Cisco ACI tenant provisioning. Tenant con
 ```
 aci-gitops-pipeline/
 ├── .github/
+│   ├── CODEOWNERS                  # Repository ownership
 │   └── workflows/
-│       ├── validate.yml        # PR: lint + plan + dry-run
-│       └── deploy.yml          # Merge to main: deploy + health check
+│       ├── validate.yml            # PR: lint + plan + dry-run
+│       └── deploy.yml              # Merge to main: deploy + health check
 │
-├── tenants/                    # Source of truth — edit these files
-│   ├── prod-tenant.yml
-│   └── dev-tenant.yml
+├── tenants/                        # Source of truth — edit these files
+│   ├── dev-tenant.yml              # Dev environment (unenforced VRF)
+│   └── prod-tenant.yml             # Prod environment (3-tier app model)
 │
 ├── ansible/
 │   ├── playbooks/
-│   │   ├── provision_tenant.yml
-│   │   ├── validate_fabric.yml
-│   │   └── rollback.yml
+│   │   ├── provision_tenant.yml    # Main provisioning playbook
+│   │   ├── validate_fabric.yml     # Read-only fabric health check
+│   │   └── rollback.yml            # Remove tenant objects from APIC
 │   ├── roles/
-│   │   ├── aci_tenant/         # Tenant / VRF / BD provisioning
-│   │   ├── aci_networking/     # EPG / contract / L3Out
-│   │   └── aci_security/       # Contract subjects / filters
+│   │   ├── aci_tenant/             # Tenant / VRF / BD provisioning
+│   │   ├── aci_networking/         # App profile / EPG provisioning
+│   │   └── aci_security/           # Contracts / filters / subjects
 │   ├── inventory/
-│   │   └── hosts.yml
-│   └── group_vars/
-│       └── aci.yml
+│   │   ├── hosts.yml               # APIC inventory
+│   │   └── group_vars/
+│   │       └── aci.yml             # ACI connection variables
+│   ├── ansible.cfg
+│   ├── ansible-requirements.yml
+│   └── .ansible-lint
 │
 ├── terraform/
 │   ├── modules/
-│   │   ├── tenant/             # ACI tenant + VRF + BD
-│   │   ├── networking/         # EPGs + contracts
-│   │   └── security/           # Contract filters + subjects
+│   │   └── tenant/                 # Reusable ACI tenant module
 │   └── environments/
-│       ├── dev/                # Dev APIC target
-│       └── prod/               # Prod APIC target
+│       └── dev/                    # Dev APIC target
 │
 ├── python/
-│   ├── apic_health.py          # Post-deploy fabric health check
-│   ├── fabric_inventory.py     # Pull device + endpoint inventory
-│   ├── servicenow_cr.py        # Auto CR creation and closure
+│   ├── apic_health.py              # Post-deploy fabric health check
+│   ├── servicenow_cr.py            # Full CR lifecycle automation
 │   └── tests/
-│       ├── test_apic_health.py
-│       └── test_servicenow_cr.py
+│       └── test_apic_health.py     # pytest with mocked APIC
 │
-├── docs/
-│   ├── getting-started.md
-│   └── pipeline-flow.md
-│
-├── Makefile                    # Local dev shortcuts
+├── Makefile                        # Local dev shortcuts
 ├── requirements.txt
-└── ansible-requirements.yml
+└── .env.example                    # Credential template
 ```
 
 ---
@@ -106,35 +105,24 @@ aci-gitops-pipeline/
 - Python 3.10+
 - Ansible 8+
 - Terraform 1.6+
-- Access to [Cisco DevNet always-on ACI sandbox](https://devnetsandbox.cisco.com/DevNet/catalog/open-nxos-programmability_open-nx-os-programmability) or your own APIC
+- Access to [Cisco DevNet always-on ACI sandbox](https://devnetsandbox.cisco.com) or your own APIC
 - ServiceNow developer instance at [developer.servicenow.com](https://developer.servicenow.com)
 
 ### 1. Clone and install dependencies
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/aci-gitops-pipeline.git
+git clone https://github.com/imrankhanbit/aci-gitops-pipeline.git
 cd aci-gitops-pipeline
 
 pip install -r requirements.txt
-ansible-galaxy collection install -r ansible-requirements.yml
+ansible-galaxy collection install -r ansible/ansible-requirements.yml
 ```
 
 ### 2. Configure credentials
 
-Copy the example env file and fill in your sandbox credentials:
-
 ```bash
 cp .env.example .env
-```
-
-```bash
-# .env
-APIC_HOST=sandboxapicdc.cisco.com
-APIC_USERNAME=admin
-APIC_PASSWORD=!v3G@!4@Y
-SNOW_INSTANCE=https://your-instance.service-now.com
-SNOW_USERNAME=admin
-SNOW_PASSWORD=your-snow-password
+# Edit .env with your sandbox credentials
 ```
 
 > **Note:** Never commit `.env` to Git. It is in `.gitignore`. For GitHub Actions, add these as repository secrets.
@@ -156,33 +144,36 @@ tenant:
       vrf: "PROD-VRF"
       gateway: "10.10.10.1"
       mask: "24"
-  epgs:
-    - name: "WEB-EPG"
-      bd: "PROD-BD"
-      contracts:
-        provided: ["WEB-TO-APP"]
-        consumed: []
+  app_profiles:
+    - name: "PROD-APP"
+      epgs:
+        - name: "WEB-EPG"
+          bd: "PROD-BD"
+          contracts:
+            provided: ["WEB-TO-APP"]
+            consumed: []
   contracts:
     - name: "WEB-TO-APP"
+      scope: tenant
       subjects:
         - name: "HTTP-HTTPS"
-          filters: ["HTTP", "HTTPS"]
+          filters: ["HTTPS-FILTER"]
 ```
 
 ### 4. Run the pipeline locally
 
 ```bash
 # Validate and dry-run (safe — no changes to APIC)
-make validate TENANT=tenants/my-tenant.yml
+make validate TENANT=tenants/dev-tenant.yml
 
 # Deploy to APIC
-make deploy TENANT=tenants/my-tenant.yml
+make deploy TENANT=tenants/dev-tenant.yml
 
 # Post-deploy health check
-make health-check
+make health-check TENANT=tenants/dev-tenant.yml
 
 # Roll back last deployment
-make rollback TENANT=tenants/my-tenant.yml
+make rollback TENANT=tenants/dev-tenant.yml
 ```
 
 ### 5. Push to GitHub and let CI run
@@ -201,15 +192,15 @@ git push origin feature/add-acme-tenant
 
 Add these in **Settings → Secrets and variables → Actions**:
 
-| Secret | Value |
+| Secret | Description |
 |---|---|
-| `APIC_HOST` | `sandboxapicdc.cisco.com` |
-| `APIC_USERNAME` | `admin` |
-| `APIC_PASSWORD` | Your APIC password |
-| `SNOW_INSTANCE` | Your ServiceNow instance URL |
+| `APIC_HOST` | APIC hostname (e.g. `sandboxapicdc.cisco.com`) |
+| `APIC_USERNAME` | APIC username |
+| `APIC_PASSWORD` | APIC password |
+| `SNOW_INSTANCE` | ServiceNow instance URL (e.g. `https://dev12345.service-now.com`) |
 | `SNOW_USERNAME` | ServiceNow username |
 | `SNOW_PASSWORD` | ServiceNow password |
-| `SNOW_ASSIGNMENT_GROUP` | Your assignment group sys_id |
+| `SNOW_ASSIGNMENT_GROUP` | Assignment group name (e.g. `Network`) |
 
 ---
 
@@ -219,22 +210,38 @@ Add these in **Settings → Secrets and variables → Actions**:
 
 | Stage | Tool | What it checks |
 |---|---|---|
-| YAML lint | `yamllint` | Tenant YAML syntax |
-| Ansible lint | `ansible-lint` | Playbook best practices |
-| Terraform validate | `terraform validate` | HCL syntax |
-| Terraform plan | `terraform plan` | What would change (no apply) |
-| Unit tests | `pytest` | Python script logic (mocked API) |
-| Dry-run | Ansible `check` mode | APIC changes preview (DevNet sandbox) |
+| Ansible lint | `ansible-lint` | Playbook best practices (moderate profile) |
+| Terraform validate & plan | `terraform validate` + `plan` | HCL syntax and planned changes |
+| Python unit tests | `pytest` | Script logic with mocked APIC responses |
+| Ansible dry-run | `--check --diff` | APIC change preview against DevNet sandbox |
 
 ### On Merge to main (`deploy.yml`)
 
 | Stage | What happens |
 |---|---|
-| ServiceNow CR | Auto-created with change description and CI details |
-| Terraform apply | ACI objects provisioned via TF state |
-| Ansible deploy | Remaining objects pushed via cisco.aci collection |
-| Health check | Python pulls APIC fabric health; fails pipeline if critical faults found |
-| ServiceNow close | CR closed with deployment evidence (pipeline URL, timestamp, health output) |
+| Open ServiceNow CR | Auto-created; walks New → Assess → Authorize → CAB approval → Scheduled |
+| Ansible deploy | Tenant objects pushed to APIC via `cisco.aci` collection |
+| Health check | Python verifies tenant, VRF, and BD exist in APIC |
+| Close ServiceNow CR | CR walked Implement → Review → Closed with pipeline evidence |
+
+---
+
+## ServiceNow CR lifecycle
+
+The pipeline fully automates the ITIL change request lifecycle — no human intervention required:
+
+```
+New → Assess → Authorize → [CAB auto-approve] → Scheduled
+                                                      ↓
+                                              [Ansible deploy]
+                                                      ↓
+                                              [Health check]
+                                                      ↓
+                                        Implement → Review → Closed
+                                        (close_code: successful)
+```
+
+The `sn_chg_rest` Change Management REST API is used for state transitions, which correctly integrates with the ServiceNow change model state machine.
 
 ---
 
@@ -253,10 +260,10 @@ The sandbox resets periodically, so CI pipelines run against a clean state.
 
 ## Tech stack
 
-`Cisco ACI` · `Ansible` · `cisco.aci collection` · `Terraform` · `CiscoDevNet/aci provider` · `Python` · `GitHub Actions` · `ServiceNow REST API` · `APIC REST API` · `YAML` · `Jinja2` · `pytest` · `ansible-lint`
+`Cisco ACI` · `Ansible` · `cisco.aci collection` · `Terraform` · `CiscoDevNet/aci provider` · `Python` · `GitHub Actions` · `ServiceNow REST API` · `sn_chg_rest API` · `APIC REST API` · `YAML` · `Jinja2` · `pytest` · `ansible-lint`
 
 ---
 
 ## Author
 
-Built by a Senior Network Automation Engineer with 14 years of DC infrastructure experience, 4 of them building production GitOps pipelines for Cisco ACI environments at scale.
+Built by a Senior Network Automation Engineer with 14 years of DC infrastructure experience, specialising in Cisco ACI and network automation at scale.

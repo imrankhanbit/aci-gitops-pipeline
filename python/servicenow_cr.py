@@ -259,7 +259,10 @@ def cmd_create(args, client):
             return 1
 
     # ── Step 6: Scheduled -> Implement ───────────────────────────
+    # The Implement button in the UI also sets work_start (actual start date).
+    # Without it the "Change Model: Check State Transition" business rule blocks the move.
     transition(client, sys_id, cr_number, STATE_IMPLEMENT, "Implement", {
+        "work_start": datetime.now(timezone.utc).strftime(SNOW_DATE_FMT),
         "work_notes": "Deployment starting - aci-gitops-pipeline.",
     })
 
@@ -280,6 +283,7 @@ def cmd_close(args, client):
 
     # ── Review ───────────────────────────────────────────────────
     transition(client, sys_id, args.cr_id, STATE_REVIEW, "Review", {
+        "work_end": datetime.now(timezone.utc).strftime(SNOW_DATE_FMT),
         "work_notes": (
             "Post-deploy health check PASSED.\n"
             "Pipeline: {}\nCompleted: {}\nCommit: {}\n"

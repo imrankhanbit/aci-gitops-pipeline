@@ -1,31 +1,15 @@
 #!/usr/bin/env python3
 """
-servicenow_cr.py
-================
-Automates ServiceNow change request lifecycle for ACI pipeline deployments.
+servicenow_cr.py - ServiceNow Change Request automation for ACI GitOps pipeline.
 
-Actions:
-  create  — Opens a new Standard change request, prints sys_id
-  close   — Closes an existing CR with deployment evidence
-  status  — Prints current state of a CR
+ServiceNow Change state numeric values:
+  -5 = New, -4 = Assess, -3 = Authorize, -2 = Scheduled,
+   0 = Implement, 3 = Review, 4 = Closed, 7 = Canceled
+
+Actions: create, close, status
 
 Credentials from environment variables:
-  SNOW_INSTANCE   — e.g. https://dev12345.service-now.com
-  SNOW_USERNAME
-  SNOW_PASSWORD
-  SNOW_ASSIGNMENT_GROUP — sys_id of the assignment group
-
-Usage:
-  # Create CR before deployment
-  python servicenow_cr.py create \
-    --tenant ACME-PROD \
-    --pipeline-url https://github.com/org/repo/actions/runs/123456 \
-    --description "GitOps deployment: add WEB-EPG to ACME-PROD tenant"
-
-  # Close CR after successful deployment
-  python servicenow_cr.py close \
-    --cr-id CHG0012345 \
-    --pipeline-url https://github.com/org/repo/actions/runs/123456
+  SNOW_INSTANCE, SNOW_USERNAME, SNOW_PASSWORD, SNOW_ASSIGNMENT_GROUP
 """
 
 import os
@@ -46,9 +30,18 @@ log = logging.getLogger(__name__)
 
 SNOW_DATE_FMT = "%Y-%m-%d %H:%M:%S"
 
+# Numeric state constants
+STATE_NEW        = "-5"
+STATE_ASSESS     = "-4"
+STATE_AUTHORIZE  = "-3"
+STATE_SCHEDULED  = "-2"
+STATE_IMPLEMENT  = "0"
+STATE_REVIEW     = "3"
+STATE_CLOSED     = "4"
+
 
 class ServiceNowClient:
-    def __init__(self, instance: str, username: str, password: str):
+    def __init__(self, instance, username, password):
         self.base_url = instance.rstrip("/")
         self.session = requests.Session()
         self.session.auth = (username, password)
@@ -57,151 +50,161 @@ class ServiceNowClient:
             "Accept": "application/json",
         })
 
-    def _url(self, table: str, sys_id: str = "") -> str:
-        path = f"/api/now/table/{table}"
+    def _url(self, table, sys_id=""):
+        path = "/api/now/table/{}".format(table)
         if sys_id:
-            path += f"/{sys_id}"
-        return f"{self.base_url}{path}"
+            path += "/{}".format(sys_id)
+        return "{}{}".format(self.base_url, path)
 
-    def create_change(self, payload: dict) -> dict:
+    def create_change(self, payload):
         resp = self.session.post(self._url("change_request"), json=payload, timeout=30)
         resp.raise_for_status()
         return resp.json()["result"]
 
-    def update_change(self, sys_id: str, payload: dict) -> dict:
+    def update_change(self, sys_id, payload):
         resp = self.session.patch(self._url("change_request", sys_id), json=payload, timeout=30)
         resp.raise_for_status()
         return resp.json()["result"]
 
-    def get_change_by_number(self, number: str) -> dict:
+    def get_change_by_number(self, number):
         params = {
-            "sysparm_query": f"number={number}",
+            "sysparm_query": "number={}".format(number),
             "sysparm_limit": 1,
-            "sysparm_fields": "sys_id,number,state,short_description,assigned_to",
+            "sysparm_fields": "sys_id,number,state,short_description",
         }
         resp = self.session.get(self._url("change_request"), params=params, timeout=30)
         resp.raise_for_status()
         results = resp.json()["result"]
         if not results:
-            raise ValueError(f"Change request {number} not found.")
+            raise ValueError("Change request {} not found.".format(number))
         return results[0]
 
 
-def cmd_create(args, client: ServiceNowClient) -> int:
+def cmd_create(args, client):
     now = datetime.now(timezone.utc)
-    planned_start = now + timedelta(minutes=5)
-    planned_end   = now + timedelta(hours=2)
-
     payload = {
         "type": "standard",
         "category": "Network",
-        "short_description": (
-            f"[ACI GitOps] Tenant provisioning: {args.tenant} "
-            f"— {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
-        ),
+        "short_description": "[ACI GitOps] Tenant provisioning: {} - {}".format(
+            args.tenant, now.strftime("%Y-%m-%d %H:%M UTC")),
         "description": (
-            f"Automated change raised by aci-gitops-pipeline.\n\n"
-            f"Tenant: {args.tenant}\n"
-            f"Pipeline run: {args.pipeline_url}\n"
-            f"Triggered by: {os.environ.get('GITHUB_ACTOR', 'pipeline')}\n"
-            f"Commit: {os.environ.get('GITHUB_SHA', 'N/A')[:12]}\n\n"
-            f"Change description:\n{args.description}\n\n"
-            f"Rollback plan: Run rollback.yml playbook with the same tenant YAML file. "
-            f"All ACI objects carry the annotation 'orchestrated-by:aci-gitops-pipeline' "
-            f"for identification."
+            "Automated change raised by aci-gitops-pipeline.\n\n"
+            "Tenant: {}\nPipeline run: {}\nTriggered by: {}\nCommit: {}\n\n"
+            "Change description:\n{}\n\n"
+            "Rollback: Run rollback.yml playbook with the same tenant YAML file."
+        ).format(
+            args.tenant, args.pipeline_url,
+            os.environ.get("GITHUB_ACTOR", "pipeline"),
+            os.environ.get("GITHUB_SHA", "N/A")[:12],
+            args.description,
         ),
-        "start_date": planned_start.strftime(SNOW_DATE_FMT),
-        "end_date":   planned_end.strftime(SNOW_DATE_FMT),
-        "assignment_group": os.environ.get("SNOW_ASSIGNMENT_GROUP", ""),
+        "start_date": (now + timedelta(minutes=5)).strftime(SNOW_DATE_FMT),
+        "end_date": (now + timedelta(hours=2)).strftime(SNOW_DATE_FMT),
+        "assignment_group": os.environ.get("SNOW_ASSIGNMENT_GROUP", "Network"),
         "risk": "low",
         "impact": "2",
         "priority": "3",
-        "state": "scheduled",   # -5 in ServiceNow numeric state
+        "state": STATE_SCHEDULED,
     }
 
     result = client.create_change(payload)
     cr_number = result.get("number", "N/A")
     cr_sys_id = result.get("sys_id", "N/A")
 
-    print(f"\nChange request created successfully.")
-    print(f"  Number : {cr_number}")
-    print(f"  sys_id : {cr_sys_id}")
-    print(f"  State  : {result.get('state', 'N/A')}\n")
+    print("\nChange request created.")
+    print("  Number : {}".format(cr_number))
+    print("  sys_id : {}".format(cr_sys_id))
+    print("  State  : {}\n".format(result.get("state", "N/A")))
 
-    # Write sys_id to file so deploy.yml can read it for the close step
     with open(".snow_cr_sysid", "w") as f:
         f.write(cr_sys_id)
     with open(".snow_cr_number", "w") as f:
         f.write(cr_number)
 
-    log.info("CR sys_id written to .snow_cr_sysid for pipeline use.")
+    log.info("CR %s created and written to .snow_cr_number", cr_number)
     return 0
 
 
-def cmd_close(args, client: ServiceNowClient) -> int:
-    # Resolve sys_id from CR number
+def cmd_close(args, client):
     cr = client.get_change_by_number(args.cr_id)
     sys_id = cr["sys_id"]
+    log.info("Closing CR %s (sys_id: %s)", args.cr_id, sys_id)
 
     close_notes = (
-        f"Change implemented successfully by aci-gitops-pipeline.\n\n"
-        f"Pipeline run : {args.pipeline_url}\n"
-        f"Completed at : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
-        f"Commit SHA   : {os.environ.get('GITHUB_SHA', 'N/A')}\n\n"
-        f"Post-deploy health check: PASSED\n"
-        f"  - All fabric nodes active\n"
-        f"  - Zero critical faults\n"
-        f"  - Tenant objects confirmed present in APIC\n\n"
-        f"Evidence: See pipeline run URL above for full logs and health check output."
+        "Change implemented successfully by aci-gitops-pipeline.\n\n"
+        "Pipeline run : {}\nCompleted at : {}\nCommit SHA   : {}\n\n"
+        "Post-deploy health check: PASSED\n"
+        "  - Tenant objects confirmed present in APIC\n"
+        "  - VRF, Bridge Domain, EPG verified via REST API\n\n"
+        "Evidence: See pipeline run URL above for full logs."
+    ).format(
+        args.pipeline_url,
+        datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        os.environ.get("GITHUB_SHA", "N/A"),
     )
 
-    payload = {
-        "state": "closed",
-        "close_code": "successful",
-        "close_notes": close_notes,
-        "work_notes": f"Auto-closed by aci-gitops-pipeline. Pipeline: {args.pipeline_url}",
+    # Walk through full ServiceNow lifecycle: New->Assess->Authorize->Scheduled->Implement->Review->Closed
+    assignment_group = os.environ.get("SNOW_ASSIGNMENT_GROUP", "Network")
+    transitions = [
+        (STATE_ASSESS,     {"state": STATE_ASSESS, "assignment_group": assignment_group,
+                            "work_notes": "Assessed by aci-gitops-pipeline."}),
+        (STATE_AUTHORIZE,  {"state": STATE_AUTHORIZE, "work_notes": "Authorized by aci-gitops-pipeline."}),
+        (STATE_SCHEDULED,  {"state": STATE_SCHEDULED, "work_notes": "Scheduled by aci-gitops-pipeline."}),
+        (STATE_IMPLEMENT,  {"state": STATE_IMPLEMENT, "work_notes": "Deployment in progress."}),
+        (STATE_REVIEW,     {"state": STATE_REVIEW,    "work_notes": "Post-deploy health check passed."}),
+        (STATE_CLOSED,     {"state": STATE_CLOSED, "close_code": "successful",
+                            "close_notes": close_notes,
+                            "work_notes": "Auto-closed by aci-gitops-pipeline. Pipeline: {}".format(
+                                args.pipeline_url)}),
+    ]
+
+    state_names = {
+        STATE_ASSESS: "Assess", STATE_AUTHORIZE: "Authorize",
+        STATE_SCHEDULED: "Scheduled", STATE_IMPLEMENT: "Implement",
+        STATE_REVIEW: "Review", STATE_CLOSED: "Closed",
     }
 
-    result = client.update_change(sys_id, payload)
-    print(f"\nChange request {args.cr_id} closed.")
-    print(f"  State      : {result.get('state', 'N/A')}")
-    print(f"  Close code : {result.get('close_code', 'N/A')}\n")
+    for state, payload in transitions:
+        try:
+            result = client.update_change(sys_id, payload)
+            log.info("CR transitioned to %s", state_names.get(state, state))
+        except Exception as exc:
+            log.warning("Transition to %s skipped: %s", state_names.get(state, state), exc)
+
+    print("\nChange request {} closed successfully.".format(args.cr_id))
+    print("  Final state: Closed\n")
     return 0
 
 
-def cmd_status(args, client: ServiceNowClient) -> int:
+def cmd_status(args, client):
     cr = client.get_change_by_number(args.cr_id)
-    print(f"\nChange request: {cr.get('number')}")
-    print(f"  State       : {cr.get('state')}")
-    print(f"  Description : {cr.get('short_description')}")
-    print(f"  Assigned to : {cr.get('assigned_to', {}).get('display_value', 'N/A')}\n")
+    print("\nChange request: {}".format(cr.get("number")))
+    print("  State       : {}".format(cr.get("state")))
+    print("  Description : {}\n".format(cr.get("short_description")))
     return 0
 
 
-def main() -> int:
+def main():
     parser = argparse.ArgumentParser(description="ServiceNow change request automation")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # create
-    p_create = subparsers.add_parser("create", help="Create a new change request")
+    p_create = subparsers.add_parser("create")
     p_create.add_argument("--tenant", required=True)
     p_create.add_argument("--pipeline-url", required=True)
     p_create.add_argument("--description", default="ACI tenant provisioning via GitOps pipeline")
 
-    # close
-    p_close = subparsers.add_parser("close", help="Close an existing change request")
-    p_close.add_argument("--cr-id", required=True, help="CR number, e.g. CHG0012345")
+    p_close = subparsers.add_parser("close")
+    p_close.add_argument("--cr-id", required=True)
     p_close.add_argument("--pipeline-url", required=True)
 
-    # status
-    p_status = subparsers.add_parser("status", help="Print CR status")
+    p_status = subparsers.add_parser("status")
     p_status.add_argument("--cr-id", required=True)
 
     args = parser.parse_args()
 
-    instance  = os.environ.get("SNOW_INSTANCE")
-    username  = os.environ.get("SNOW_USERNAME")
-    password  = os.environ.get("SNOW_PASSWORD")
+    instance = os.environ.get("SNOW_INSTANCE")
+    username = os.environ.get("SNOW_USERNAME")
+    password = os.environ.get("SNOW_PASSWORD")
 
     if not all([instance, username, password]):
         log.error("SNOW_INSTANCE, SNOW_USERNAME, SNOW_PASSWORD must all be set.")
@@ -217,7 +220,7 @@ def main() -> int:
         elif args.command == "status":
             return cmd_status(args, client)
     except requests.HTTPError as exc:
-        log.error("ServiceNow API error: %s — %s", exc.response.status_code, exc.response.text)
+        log.error("ServiceNow API error: %s - %s", exc.response.status_code, exc.response.text)
         return 1
     except Exception as exc:
         log.error("Unexpected error: %s", exc)

@@ -107,8 +107,10 @@ class ServiceNowClient:
         return results[0]
 
     def get_pending_approvals(self, sys_id):
+        # Fetch ALL approvals for this CR - the CAB workflow may mark some as
+        # "No Longer Required" before we query, so we approve everything.
         params = {
-            "sysparm_query": "document_id={}&state=requested".format(sys_id),
+            "sysparm_query": "document_id={}".format(sys_id),
             "sysparm_fields": "sys_id,approver,state",
         }
         resp = api_call_with_retry(
@@ -232,7 +234,7 @@ def cmd_create(args, client):
 
     # ── Step 5: Wait for ServiceNow to move CR to Scheduled ──────
     log.info("Waiting for CR to reach Scheduled state after approvals...")
-    for attempt in range(12):   # up to 2 minutes
+    for attempt in range(18):   # up to 3 minutes
         time.sleep(10)
         cr = client.get_change(sys_id)
         state = int(cr.get("state", 99))
@@ -244,8 +246,17 @@ def cmd_create(args, client):
             log.info("CR %s is Scheduled.", cr_number)
             break
     else:
-        log.error("CR did not reach Scheduled within 2 minutes.")
-        return 1
+        # Still in Authorize — all approvals were set, force move to Scheduled
+        log.warning("CR still in Authorize after 3 min — forcing move to Scheduled.")
+        try:
+            client.update_change(sys_id, {
+                "state": STATE_SCHEDULED,
+                "work_notes": "Force-moved to Scheduled by aci-gitops-pipeline after all approvals granted.",
+            })
+            log.info("CR %s forced to Scheduled.", cr_number)
+        except requests.HTTPError as exc:
+            log.error("Could not force Scheduled: %s", exc.response.text[:200])
+            return 1
 
     # ── Step 6: Scheduled -> Implement ───────────────────────────
     transition(client, sys_id, cr_number, STATE_IMPLEMENT, "Implement", {

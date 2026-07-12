@@ -1,170 +1,99 @@
-# ============================================================
-# Tenant: ACME-PROD
-# Owner: network-automation-team
-# Last reviewed: 2026-07-01
-# Change history: tracked in Git — see git log tenants/prod-tenant.yml
-# ============================================================
+# tenant: ACME-PROD
 
 tenant:
-  name: "ACME-PROD"
-  description: "ACME Corporation — Production workloads"
-  annotation: "orchestrated-by:aci-gitops-pipeline"
+  name: ACME-PROD
+  description: ACME Corporation - Production workloads
+  annotation: orchestrated-by:aci-gitops-pipeline
 
-  # ── VRFs ────────────────────────────────────────────────────
   vrfs:
-    - name: "PROD-VRF"
-      description: "Production VRF — enforced policy mode"
-      enforcement: enforced          # enforced | unenforced
+    - name: PROD-VRF
+      description: Production VRF
+      enforcement: enforced
       preferred_group: disabled
 
-  # ── Bridge Domains ──────────────────────────────────────────
   bridge_domains:
-    - name: "WEB-BD"
-      description: "Web tier bridge domain"
-      vrf: "PROD-VRF"
-      gateway: "10.10.10.1"
-      mask: "24"
+    - name: WEB-BD
+      vrf: PROD-VRF
+      gateway: 10.10.10.1
+      mask: '24'
       unicast_routing: true
       arp_flooding: false
       l2_unknown_unicast: proxy
 
-    - name: "APP-BD"
-      description: "Application tier bridge domain"
-      vrf: "PROD-VRF"
-      gateway: "10.10.20.1"
-      mask: "24"
+    - name: APP-BD
+      vrf: PROD-VRF
+      gateway: 10.10.20.1
+      mask: '24'
       unicast_routing: true
       arp_flooding: false
       l2_unknown_unicast: proxy
 
-    - name: "DB-BD"
-      description: "Database tier bridge domain"
-      vrf: "PROD-VRF"
-      gateway: "10.10.30.1"
-      mask: "24"
+    - name: DB-BD
+      vrf: PROD-VRF
+      gateway: 10.10.30.1
+      mask: '24'
       unicast_routing: true
       arp_flooding: false
       l2_unknown_unicast: proxy
 
-  # ── Application Profiles & EPGs ─────────────────────────────
   app_profiles:
-    - name: "ACME-3TIER"
-      description: "3-tier web application"
+    - name: ACME-3TIER
       epgs:
-        - name: "WEB-EPG"
-          description: "Web servers — internet-facing"
-          bd: "WEB-BD"
+        - name: WEB-EPG
+          bd: WEB-BD
           preferred_group: false
           contracts:
-            provided:
-              - "EXT-TO-WEB"
-            consumed:
-              - "WEB-TO-APP"
-              - "SHARED-DNS"
-
-        - name: "APP-EPG"
-          description: "Application servers"
-          bd: "APP-BD"
+            provided: [EXT-TO-WEB]
+            consumed: [WEB-TO-APP]
+        - name: APP-EPG
+          bd: APP-BD
           preferred_group: false
           contracts:
-            provided:
-              - "WEB-TO-APP"
-            consumed:
-              - "APP-TO-DB"
-              - "SHARED-DNS"
-
-        - name: "DB-EPG"
-          description: "Database servers"
-          bd: "DB-BD"
+            provided: [WEB-TO-APP]
+            consumed: [APP-TO-DB]
+        - name: DB-EPG
+          bd: DB-BD
           preferred_group: false
           contracts:
-            provided:
-              - "APP-TO-DB"
-            consumed:
-              - "SHARED-DNS"
+            provided: [APP-TO-DB]
+            consumed: []
 
-  # ── Contracts ────────────────────────────────────────────────
   contracts:
-    - name: "EXT-TO-WEB"
-      description: "External to web tier — HTTPS only"
+    - name: EXT-TO-WEB
       scope: tenant
       subjects:
-        - name: "HTTPS-SUBJ"
-          filters:
-            - "HTTPS-FILTER"
-
-    - name: "WEB-TO-APP"
-      description: "Web to application tier"
+        - name: HTTPS-SUBJ
+          filters: [HTTPS-FILTER]
+    - name: WEB-TO-APP
       scope: tenant
       subjects:
-        - name: "APP-PORTS-SUBJ"
-          filters:
-            - "APP-8080-FILTER"
-            - "APP-8443-FILTER"
-
-    - name: "APP-TO-DB"
-      description: "Application to database tier — MySQL and PostgreSQL"
+        - name: APP-SUBJ
+          filters: [APP-8080-FILTER]
+    - name: APP-TO-DB
       scope: tenant
       subjects:
-        - name: "DB-PORTS-SUBJ"
-          filters:
-            - "MYSQL-FILTER"
-            - "PGSQL-FILTER"
+        - name: DB-SUBJ
+          filters: [MYSQL-FILTER]
 
-    - name: "SHARED-DNS"
-      description: "DNS resolution — consumed by all EPGs"
-      scope: tenant
-      subjects:
-        - name: "DNS-SUBJ"
-          filters:
-            - "DNS-UDP-FILTER"
-
-  # ── Filters ──────────────────────────────────────────────────
   filters:
-    - name: "HTTPS-FILTER"
+    - name: HTTPS-FILTER
       entries:
-        - name: "TCP-443"
+        - name: TCP-443
           ethertype: ip
           ip_protocol: tcp
-          dest_from_port: "443"
-          dest_to_port: "443"
-
-    - name: "APP-8080-FILTER"
+          dest_from_port: '443'
+          dest_to_port: '443'
+    - name: APP-8080-FILTER
       entries:
-        - name: "TCP-8080"
+        - name: TCP-8080
           ethertype: ip
           ip_protocol: tcp
-          dest_from_port: "8080"
-          dest_to_port: "8080"
-
-    - name: "APP-8443-FILTER"
+          dest_from_port: '8080'
+          dest_to_port: '8080'
+    - name: MYSQL-FILTER
       entries:
-        - name: "TCP-8443"
+        - name: TCP-3306
           ethertype: ip
           ip_protocol: tcp
-          dest_from_port: "8443"
-          dest_to_port: "8443"
-
-    - name: "MYSQL-FILTER"
-      entries:
-        - name: "TCP-3306"
-          ethertype: ip
-          ip_protocol: tcp
-          dest_from_port: "3306"
-          dest_to_port: "3306"
-
-    - name: "PGSQL-FILTER"
-      entries:
-        - name: "TCP-5432"
-          ethertype: ip
-          ip_protocol: tcp
-          dest_from_port: "5432"
-          dest_to_port: "5432"
-
-    - name: "DNS-UDP-FILTER"
-      entries:
-        - name: "UDP-53"
-          ethertype: ip
-          ip_protocol: udp
-          dest_from_port: "53"
-          dest_to_port: "53"
+          dest_from_port: '3306'
+          dest_to_port: '3306'

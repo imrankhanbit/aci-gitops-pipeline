@@ -1,13 +1,9 @@
 ---
 galaxy_info:
   author: aci-gitops-pipeline
-  description: Cisco ACI aci_tenant role for GitOps-driven tenant provisioning
+  description: Cisco ACI role for GitOps-driven tenant provisioning
   license: MIT
   min_ansible_version: "2.14"
-  platforms:
-    - name: Generic
-      versions:
-        - all
   galaxy_tags:
     - network
     - cisco
